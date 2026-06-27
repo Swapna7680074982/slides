@@ -7,6 +7,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import 'demo_slides.dart';
 import 'slide_item.dart';
+import 'video_slide_widget.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,12 +51,32 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
 
   late List<SlideItem> _slides;
   late PageController _pageController;
-  int _intervalSeconds = 2;
   Timer? _timer;
 
   // Platform states
   bool _isDefaultLauncher = false;
   bool _showSettings = false;
+  bool _isMuted = false;
+
+  // Custom states
+  PlaybackMode _playbackMode = PlaybackMode.all;
+  final _addUrlController = TextEditingController();
+  SlideType _addType = SlideType.networkImage;
+  int _addDuration = 5;
+
+  List<SlideItem> get _activeSlides {
+    return _slides.where((slide) {
+      if (!slide.isActive) return false;
+      switch (_playbackMode) {
+        case PlaybackMode.all:
+          return true;
+        case PlaybackMode.imagesOnly:
+          return !slide.isVideo;
+        case PlaybackMode.videosOnly:
+          return slide.isVideo;
+      }
+    }).toList();
+  }
 
   @override
   void initState() {
@@ -73,7 +94,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
 
   void _precacheImages() {
     for (final slide in _slides) {
-      if (!slide.isSvg) {
+      if (slide.type == SlideType.assetImage) {
         precacheImage(AssetImage(slide.assetPath), context);
       }
     }
@@ -84,6 +105,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     _pageController.dispose();
     _timer?.cancel();
+    _addUrlController.dispose();
     super.dispose();
   }
 
@@ -100,10 +122,8 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
       final hasDismissed = await _platform.invokeMethod<bool>('hasDismissedSettings') ?? false;
       setState(() {
         _isDefaultLauncher = isDefault;
-        // If settings have never been enabled/configured, auto-show settings screen to guide the user.
         if (isDefault) {
           _showSettings = false;
-          // Also persist this so it's remembered as dismissed since it's already configured
           if (!hasDismissed) {
             _platform.invokeMethod('setDismissedSettings', {'dismissed': true});
           }
@@ -132,8 +152,6 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
   Future<void> _openHomeSettings() async {
     try {
       await _platform.invokeMethod('openHomeSettings');
-      // Automatically dismiss the popup when going to settings to configure it,
-      // so it doesn't reappear when they return from system settings.
       await _dismissSettings();
     } on PlatformException catch (e) {
       debugPrint("Error opening home settings: $e");
@@ -142,9 +160,14 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
 
   void _armTimer() {
     _timer?.cancel();
-    if (!mounted || _slides.length <= 1) return;
-    _timer = Timer.periodic(Duration(seconds: _intervalSeconds), (_) {
-      if (!mounted || _slides.isEmpty) return;
+    final active = _activeSlides;
+    if (!mounted || active.isEmpty) return;
+
+    final index = _pageController.hasClients ? _pageController.page?.round() ?? 5000 : 5000;
+    final currentSlide = active[index % active.length];
+
+    _timer = Timer(Duration(seconds: currentSlide.duration), () {
+      if (!mounted || _activeSlides.isEmpty) return;
       if (_pageController.hasClients) {
         _pageController.nextPage(
           duration: const Duration(milliseconds: 600),
@@ -155,7 +178,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
   }
 
   void _onTap() {
-    if (_slides.length <= 1) return;
+    if (_activeSlides.length <= 1) return;
     if (_pageController.hasClients) {
       _pageController.nextPage(
         duration: const Duration(milliseconds: 600),
@@ -180,47 +203,86 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
         },
         child: Stack(
           children: [
-            // 1. Vertical PageView for Slides
+            // 1. PageView for Slides
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _onTap,
-              child: PageView.builder(
-                controller: _pageController,
-                scrollDirection: Axis.vertical,
-                itemBuilder: (context, index) {
-                  if (_slides.isEmpty) return const SizedBox();
-                  final item = _slides[index % _slides.length];
-                  return _buildSlide(item);
-                },
-              ),
+              child: _activeSlides.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No active slides matching filter',
+                        style: TextStyle(color: Colors.white54, fontSize: 16),
+                      ),
+                    )
+                  : PageView.builder(
+                      controller: _pageController,
+                      scrollDirection: Axis.vertical,
+                      onPageChanged: (index) {
+                        _armTimer();
+                      },
+                      itemBuilder: (context, index) {
+                        final active = _activeSlides;
+                        if (active.isEmpty) return const SizedBox();
+                        final item = active[index % active.length];
+                        return _buildSlide(item);
+                      },
+                    ),
             ),
-  
-            // 2. Settings button (Top Right)
+
+            // 2. Control buttons (Top Right)
             Positioned(
               top: 20,
               right: 20,
-              child: ClipOval(
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    color: Colors.white.withValues(alpha: 0.12),
-                    child: IconButton(
-                      icon: const Icon(Icons.settings, color: Colors.white, size: 26),
-                      onPressed: () {
-                        if (_showSettings) {
-                          _dismissSettings();
-                        } else {
-                          setState(() {
-                            _showSettings = true;
-                          });
-                        }
-                      },
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Mute / Unmute Button
+                  ClipOval(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        color: Colors.white.withValues(alpha: 0.12),
+                        child: IconButton(
+                          icon: Icon(
+                            _isMuted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+                            color: Colors.white,
+                            size: 26,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _isMuted = !_isMuted;
+                            });
+                          },
+                        ),
+                      ),
                     ),
                   ),
-                ),
+                  const SizedBox(width: 12),
+                  // Settings Button
+                  ClipOval(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        color: Colors.white.withValues(alpha: 0.12),
+                        child: IconButton(
+                          icon: const Icon(Icons.settings, color: Colors.white, size: 26),
+                          onPressed: () {
+                            if (_showSettings) {
+                              _dismissSettings();
+                            } else {
+                              setState(() {
+                                _showSettings = true;
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-  
+
             // 3. Settings Overlay Panel
             if (_showSettings)
               Positioned.fill(
@@ -232,10 +294,8 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
                     child: GestureDetector(
                       onTap: () {}, // Prevent taps inside from dismissing dialog
                       child: Container(
-                        width: MediaQuery.of(context).size.width * 0.85,
-                        constraints: BoxConstraints(
-                          maxHeight: MediaQuery.of(context).size.height * 0.85,
-                        ),
+                        width: MediaQuery.of(context).size.width * 0.9,
+                        height: MediaQuery.of(context).size.height * 0.9,
                         margin: const EdgeInsets.symmetric(horizontal: 16),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(24),
@@ -258,44 +318,68 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
                                   ),
                                 ],
                               ),
-                              child: SingleChildScrollView(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    _buildHeader(),
-                                    const Divider(color: Colors.white24, height: 32),
-                                    _buildLauncherSetting(),
-                                    const SizedBox(height: 16),
-                                    _buildSpeedSetting(),
-                                    const Divider(color: Colors.white24, height: 32),
-                                    Center(
-                                      child: ElevatedButton(
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: const Color(0xFF4E54C8),
-                                          foregroundColor: Colors.white,
-                                          elevation: 4,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(14),
-                                          ),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 40,
-                                            vertical: 14,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _buildHeader(),
+                                  const Divider(color: Colors.white24, height: 24),
+                                  Expanded(
+                                    child: Row(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        // Left Panel: Controls
+                                        Expanded(
+                                          flex: 5,
+                                          child: SingleChildScrollView(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                _buildLauncherSetting(),
+                                                const SizedBox(height: 12),
+                                                _buildPlaybackModeSetting(),
+                                                const SizedBox(height: 12),
+                                                _buildAddSlideSetting(),
+                                              ],
+                                            ),
                                           ),
                                         ),
-                                        onPressed: _dismissSettings,
-                                        child: const Text(
-                                          'Save & Close',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.bold,
-                                            letterSpacing: 0.5,
-                                          ),
+                                        const VerticalDivider(width: 24, color: Colors.white12),
+                                        // Right Panel: Slide List
+                                        Expanded(
+                                          flex: 6,
+                                          child: _buildMediaManagerSetting(),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const Divider(color: Colors.white24, height: 24),
+                                  Center(
+                                    child: ElevatedButton(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFF4E54C8),
+                                        foregroundColor: Colors.white,
+                                        elevation: 4,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(14),
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 40,
+                                          vertical: 12,
+                                        ),
+                                      ),
+                                      onPressed: _dismissSettings,
+                                      child: const Text(
+                                        'Save & Close',
+                                        style: TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 0.5,
                                         ),
                                       ),
                                     ),
-                                  ],
-                                ),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
@@ -337,7 +421,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
                 ),
               ),
               Text(
-                'Set defaults and auto-start configurations',
+                'Set defaults, filter content types, and configure slot durations',
                 style: TextStyle(
                   color: Colors.white60,
                   fontSize: 11,
@@ -452,11 +536,9 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
     );
   }
 
-
-
-  Widget _buildSpeedSetting() {
+  Widget _buildPlaybackModeSetting() {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.04),
         borderRadius: BorderRadius.circular(16),
@@ -465,56 +547,466 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          const Text(
+            'Playback Filter',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                'Auto-Scroll Interval',
+              _buildPlaybackModeBtn(PlaybackMode.all, 'All', Icons.all_inclusive),
+              const SizedBox(width: 8),
+              _buildPlaybackModeBtn(PlaybackMode.imagesOnly, 'Images', Icons.image),
+              const SizedBox(width: 8),
+              _buildPlaybackModeBtn(PlaybackMode.videosOnly, 'Videos', Icons.videocam),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlaybackModeBtn(PlaybackMode mode, String label, IconData icon) {
+    final isSelected = _playbackMode == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () {
+          setState(() {
+            _playbackMode = mode;
+          });
+          _armTimer();
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? const Color(0xFF4E54C8).withValues(alpha: 0.25)
+                : Colors.white.withValues(alpha: 0.04),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isSelected ? const Color(0xFF8E94F2) : Colors.white12,
+              width: 1.5,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                color: isSelected ? const Color(0xFF8E94F2) : Colors.white54,
+                size: 20,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                label,
                 style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.bold,
+                  color: isSelected ? Colors.white : Colors.white54,
+                  fontSize: 12,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                 ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAddSlideSetting() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Add Custom Media URL',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _addUrlController,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            decoration: InputDecoration(
+              hintText: 'Enter image or video URL...',
+              hintStyle: const TextStyle(color: Colors.white38, fontSize: 12),
+              filled: true,
+              fillColor: Colors.white.withValues(alpha: 0.05),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Text('Type: ', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+              const SizedBox(width: 12),
+              ChoiceChip(
+                label: const Text('Image', style: TextStyle(fontSize: 11)),
+                selected: _addType == SlideType.networkImage,
+                onSelected: (val) {
+                  if (val) setState(() => _addType = SlideType.networkImage);
+                },
+                padding: EdgeInsets.zero,
+                labelPadding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              const SizedBox(width: 8),
+              ChoiceChip(
+                label: const Text('Video', style: TextStyle(fontSize: 11)),
+                selected: _addType == SlideType.networkVideo,
+                onSelected: (val) {
+                  if (val) setState(() => _addType = SlideType.networkVideo);
+                },
+                padding: EdgeInsets.zero,
+                labelPadding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              const Text('Duration: ', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.remove, color: Colors.white60, size: 16),
+                onPressed: () {
+                  if (_addDuration > 1) {
+                    setState(() => _addDuration--);
+                  }
+                },
+                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.all(6),
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF4E54C8).withValues(alpha: 0.25),
-                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.white10,
+                  borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  '$_intervalSeconds sec',
-                  style: const TextStyle(
-                    color: Color(0xFF8E94F2),
+                  '$_addDuration sec',
+                  style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.add, color: Colors.white60, size: 16),
+                onPressed: () {
+                  if (_addDuration < 60) {
+                    setState(() => _addDuration++);
+                  }
+                },
+                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.all(6),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Add to Slideshow', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF8E94F2),
+                foregroundColor: const Color(0xFF0F0F1A),
+                elevation: 0,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+              ),
+              onPressed: () {
+                final url = _addUrlController.text.trim();
+                if (url.isEmpty) return;
+
+                final newItem = SlideItem(
+                  id: 'custom_${DateTime.now().millisecondsSinceEpoch}',
+                  type: _addType,
+                  assetPath: url,
+                  duration: _addDuration,
+                  isActive: true,
+                );
+
+                setState(() {
+                  _slides.add(newItem);
+                  _addUrlController.clear();
+                });
+                _armTimer();
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Custom slide added!'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMediaManagerSetting() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Manage & Order Slides',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                'Drag items or toggle',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: _slides.isEmpty
+                ? const Center(
+                    child: Text(
+                      'No slides available.\nAdd some or reset.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white38),
+                    ),
+                  )
+                : ReorderableListView.builder(
+                    itemCount: _slides.length,
+                    onReorder: (oldIndex, newIndex) {
+                      setState(() {
+                        if (newIndex > oldIndex) {
+                          newIndex -= 1;
+                        }
+                        final item = _slides.removeAt(oldIndex);
+                        _slides.insert(newIndex, item);
+                      });
+                      _armTimer();
+                    },
+                    itemBuilder: (context, index) {
+                      final item = _slides[index];
+                      return _buildSlideManagerItem(item, index);
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSlideManagerItem(SlideItem item, int index) {
+    Widget thumbnail;
+    if (item.type == SlideType.assetImage) {
+      thumbnail = ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.asset(
+          item.assetPath,
+          width: 32,
+          height: 32,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => const Icon(Icons.image, size: 24, color: Colors.white38),
+        ),
+      );
+    } else if (item.type == SlideType.networkImage) {
+      thumbnail = ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.network(
+          item.assetPath,
+          width: 32,
+          height: 32,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => const Icon(Icons.cloud_queue, size: 24, color: Colors.white38),
+        ),
+      );
+    } else if (item.type == SlideType.networkVideo) {
+      thumbnail = Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: const Color(0xFF8E94F2).withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: const Icon(Icons.play_circle_outline, size: 20, color: Color(0xFF8E94F2)),
+      );
+    } else {
+      thumbnail = Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: Colors.white12,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: const Icon(Icons.code, size: 20, color: Colors.white54),
+      );
+    }
+
+    final isURL = item.type == SlideType.networkImage || item.type == SlideType.networkVideo;
+    final name = isURL
+        ? (item.assetPath.split('/').last.split('?').first)
+        : item.assetPath.split('/').last;
+
+    return Container(
+      key: ValueKey(item.id),
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.03),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: item.isActive
+              ? Colors.white.withValues(alpha: 0.05)
+              : Colors.white.withValues(alpha: 0.01),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              ReorderableDragStartListener(
+                index: index,
+                child: const Icon(Icons.drag_indicator, color: Colors.white30, size: 18),
+              ),
+              const SizedBox(width: 8),
+              thumbnail,
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: item.isActive ? Colors.white : Colors.white30,
                     fontSize: 13,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                onPressed: () {
+                  setState(() {
+                    _slides.removeAt(index);
+                  });
+                  _armTimer();
+                },
+                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.all(6),
+              ),
             ],
           ),
           const SizedBox(height: 6),
-          Text(
-            'Adjust how long each slide displays before scrolling down to the next.',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.5),
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Slider(
-            value: _intervalSeconds.toDouble(),
-            min: 1,
-            max: 10,
-            divisions: 9,
-            activeColor: const Color(0xFF4E54C8),
-            inactiveColor: Colors.white12,
-            onChanged: (val) {
-              setState(() {
-                _intervalSeconds = val.toInt();
-              });
-              _armTimer();
-            },
+          Row(
+            children: [
+              const SizedBox(width: 26),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  item.type.name.replaceAll('network', 'Live ').replaceAll('asset', 'Local '),
+                  style: TextStyle(
+                    color: item.isActive ? Colors.white60 : Colors.white24,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.remove, size: 12, color: Colors.white54),
+                    onPressed: !item.isActive
+                        ? null
+                        : () {
+                            if (item.duration > 1) {
+                              setState(() {
+                                _slides[index] = item.copyWith(duration: item.duration - 1);
+                              });
+                              _armTimer();
+                            }
+                          },
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                  ),
+                  Container(
+                    constraints: const BoxConstraints(minWidth: 20),
+                    alignment: Alignment.center,
+                    child: Text(
+                      '${item.duration}s',
+                      style: TextStyle(
+                        color: item.isActive ? const Color(0xFF8E94F2) : Colors.white30,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add, size: 12, color: Colors.white54),
+                    onPressed: !item.isActive
+                        ? null
+                        : () {
+                            if (item.duration < 60) {
+                              setState(() {
+                                _slides[index] = item.copyWith(duration: item.duration + 1);
+                              });
+                              _armTimer();
+                            }
+                          },
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 8),
+              Transform.scale(
+                scale: 0.7,
+                child: Switch(
+                  value: item.isActive,
+                  activeThumbColor: const Color(0xFF8E94F2),
+                  onChanged: (val) {
+                    setState(() {
+                      _slides[index] = item.copyWith(isActive: val);
+                    });
+                    _armTimer();
+                  },
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -522,31 +1014,69 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
   }
 
   Widget _buildSlide(SlideItem item) {
-    if (item.isSvg) {
-      return SvgPicture.asset(
-        item.assetPath,
-        key: ValueKey(item.assetPath),
-        fit: BoxFit.cover,
-        width: double.infinity,
-        height: double.infinity,
-      );
+    switch (item.type) {
+      case SlideType.assetSvg:
+        return SvgPicture.asset(
+          item.assetPath,
+          key: ValueKey(item.id),
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+        );
+      case SlideType.assetImage:
+        return Image.asset(
+          item.assetPath,
+          key: ValueKey(item.id),
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          errorBuilder: (context, error, stackTrace) => _buildErrorPlaceholder(item.assetPath),
+        );
+      case SlideType.networkImage:
+        return Image.network(
+          item.assetPath,
+          key: ValueKey(item.id),
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return const Center(
+              child: CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF8E94F2)),
+              ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) => _buildErrorPlaceholder(item.assetPath),
+        );
+      case SlideType.networkVideo:
+        return VideoSlideWidget(
+          key: ValueKey(item.id),
+          url: item.assetPath,
+          isMuted: _isMuted,
+        );
     }
+  }
 
-    return Image.asset(
-      item.assetPath,
-      key: ValueKey(item.assetPath),
-      fit: BoxFit.cover,
-      width: double.infinity,
-      height: double.infinity,
-      errorBuilder: (_, _, _) => const ColoredBox(
-        color: Colors.black,
-        child: Center(
-          child: Text(
-            'Could not load image',
-            style: TextStyle(color: Colors.white70),
-          ),
+  Widget _buildErrorPlaceholder(String path) {
+    return Container(
+      color: Colors.black,
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.broken_image_outlined, color: Colors.white24, size: 64),
+            const SizedBox(height: 12),
+            Text(
+              'Could not load media:\n$path',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54),
+            ),
+          ],
         ),
       ),
     );
   }
 }
+
+enum PlaybackMode { all, imagesOnly, videosOnly }

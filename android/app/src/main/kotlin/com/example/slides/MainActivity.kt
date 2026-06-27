@@ -1,25 +1,15 @@
 package com.example.slides
 
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+import android.provider.Settings
 
 class MainActivity : FlutterActivity() {
-    private val closeReceiver =
-        object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                if (intent.action == UsbWatcherService.ACTION_CLOSE_SLIDES) {
-                    finishAndRemoveTask()
-                }
-            }
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -36,75 +26,68 @@ class MainActivity : FlutterActivity() {
             )
         }
         super.onCreate(savedInstanceState)
-        val serviceIntent = Intent(this, UsbWatcherService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
-        registerCloseReceiver()
-
-        if (intent?.getBooleanExtra("is_boot_launch", false) == true) {
-            checkUsbAndPotentiallyClose()
-        }
     }
 
-    override fun onResume() {
-        super.onResume()
-        // Keep sending the user to "Display over other apps" until they enable it.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                ),
-            )
-            return
-        }
-        val refresh = Intent(this, UsbWatcherService::class.java).apply {
-            putExtra(UsbWatcherService.EXTRA_REFRESH_FROM_ACTIVITY, true)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(refresh)
-        } else {
-            startService(refresh)
-        }
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-    }
-
-    override fun onDestroy() {
-        runCatching { unregisterReceiver(closeReceiver) }
-        super.onDestroy()
-    }
-
-    private fun registerCloseReceiver() {
-        val filter = IntentFilter(UsbWatcherService.ACTION_CLOSE_SLIDES)
-        ContextCompat.registerReceiver(
-            this,
-            closeReceiver,
-            filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
-    }
-
-    private fun checkUsbAndPotentiallyClose() {
-        val usbManager = getSystemService(Context.USB_SERVICE) as? android.hardware.usb.UsbManager ?: return
-        val hasDevice = usbManager.deviceList.isNotEmpty()
-        @Suppress("DEPRECATION")
-        val hasAccessory = usbManager.accessoryList?.isNotEmpty() == true
-        if (!hasDevice && !hasAccessory) {
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                val currentDevice = usbManager.deviceList.isNotEmpty()
-                @Suppress("DEPRECATION")
-                val currentAccessory = usbManager.accessoryList?.isNotEmpty() == true
-                if (!currentDevice && !currentAccessory) {
-                    finishAndRemoveTask()
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.slides/settings").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isDefaultLauncher" -> {
+                    result.success(isDefaultLauncher())
                 }
-            }, 10000)
+                "openHomeSettings" -> {
+                    openHomeSettings()
+                    result.success(null)
+                }
+                "isAutoLaunchEnabled" -> {
+                    result.success(isAutoLaunchEnabled())
+                }
+                "setAutoLaunchEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    setAutoLaunchEnabled(enabled)
+                    result.success(null)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
         }
     }
+
+    private fun isDefaultLauncher(): Boolean {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+        }
+        val resolveInfo = packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        return resolveInfo?.activityInfo?.packageName == packageName
+    }
+
+    private fun openHomeSettings() {
+        try {
+            val intent = Intent(Settings.ACTION_HOME_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+            } catch (ex: Exception) {
+                // Ignore fallback failure
+            }
+        }
+    }
+
+    private fun isAutoLaunchEnabled(): Boolean {
+        val prefs = getSharedPreferences("slides_prefs", Context.MODE_PRIVATE)
+        return prefs.getBoolean("auto_launch_on_unlock", false)
+    }
+
+    private fun setAutoLaunchEnabled(enabled: Boolean) {
+        val prefs = getSharedPreferences("slides_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("auto_launch_on_unlock", enabled).apply()
+    }
+
 }

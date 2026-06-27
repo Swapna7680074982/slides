@@ -1,15 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Lets the system offer to start this app when a USB mass-storage device is attached. -->
-    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Lets the user grant "Display over other apps" (special access). This is NOT what marks the
-         app as a "default app" for links/USB—that is chosen in Settings or the Open-with dialog.
-         Boot and USB wake use RECEIVE_BOOT_COMPLETED + BootReceiver / USB intents separately. -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <application
         android:label="slides"
         android:name="${applicationName}"
@@ -29,22 +21,10 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <!-- USB attach is handled by UsbAttachReceiver + UsbWatcherService only, so the system
-                 does not launch this activity a second time for the same device attach. -->
         </activity>
-        <receiver
-            android:name=".UsbAttachReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
-            </intent-filter>
-            <meta-data
-                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/usb_device_filter" />
-        </receiver>
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
@@ -58,11 +38,6 @@
                 <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
             </intent-filter>
         </receiver>
-        <service
-            android:name=".UsbWatcherService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

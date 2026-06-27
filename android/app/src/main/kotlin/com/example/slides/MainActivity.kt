@@ -12,6 +12,16 @@ import android.provider.Settings
 class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        configureShowWhenLocked()
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        configureShowWhenLocked()
+    }
+
+    private fun configureShowWhenLocked() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -25,7 +35,6 @@ class MainActivity : FlutterActivity() {
                 android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
             )
         }
-        super.onCreate(savedInstanceState)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -45,6 +54,14 @@ class MainActivity : FlutterActivity() {
                 "setAutoLaunchEnabled" -> {
                     val enabled = call.argument<Boolean>("enabled") ?: false
                     setAutoLaunchEnabled(enabled)
+                    result.success(null)
+                }
+                "hasDismissedSettings" -> {
+                    result.success(hasDismissedSettings())
+                }
+                "setDismissedSettings" -> {
+                    val dismissed = call.argument<Boolean>("dismissed") ?: false
+                    setDismissedSettings(dismissed)
                     result.success(null)
                 }
                 else -> {
@@ -88,6 +105,16 @@ class MainActivity : FlutterActivity() {
     private fun setAutoLaunchEnabled(enabled: Boolean) {
         val prefs = getSharedPreferences("slides_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("auto_launch_on_unlock", enabled).apply()
+    }
+
+    private fun hasDismissedSettings(): Boolean {
+        val prefs = getSharedPreferences("slides_prefs", Context.MODE_PRIVATE)
+        return prefs.getBoolean("has_dismissed_settings", false)
+    }
+
+    private fun setDismissedSettings(dismissed: Boolean) {
+        val prefs = getSharedPreferences("slides_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("has_dismissed_settings", dismissed).apply()
     }
 
 }

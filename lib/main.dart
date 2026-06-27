@@ -65,7 +65,18 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
     // 5000 is a safe start page to allow scrolling backwards if desired, aligning to index 0.
     _pageController = PageController(initialPage: 5000);
     _loadSettings();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _armTimer());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _precacheImages();
+      _armTimer();
+    });
+  }
+
+  void _precacheImages() {
+    for (final slide in _slides) {
+      if (!slide.isSvg) {
+        precacheImage(AssetImage(slide.assetPath), context);
+      }
+    }
   }
 
   @override
@@ -86,10 +97,17 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
   Future<void> _loadSettings() async {
     try {
       final isDefault = await _platform.invokeMethod<bool>('isDefaultLauncher') ?? false;
+      final hasDismissed = await _platform.invokeMethod<bool>('hasDismissedSettings') ?? false;
       setState(() {
         _isDefaultLauncher = isDefault;
         // If settings have never been enabled/configured, auto-show settings screen to guide the user.
-        if (!isDefault) {
+        if (isDefault) {
+          _showSettings = false;
+          // Also persist this so it's remembered as dismissed since it's already configured
+          if (!hasDismissed) {
+            _platform.invokeMethod('setDismissedSettings', {'dismissed': true});
+          }
+        } else if (!hasDismissed) {
           _showSettings = true;
         }
       });
@@ -98,9 +116,25 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
     }
   }
 
+  Future<void> _dismissSettings() async {
+    try {
+      await _platform.invokeMethod('setDismissedSettings', {'dismissed': true});
+    } on PlatformException catch (e) {
+      debugPrint("Error saving settings dismissal: $e");
+    }
+    if (mounted) {
+      setState(() {
+        _showSettings = false;
+      });
+    }
+  }
+
   Future<void> _openHomeSettings() async {
     try {
       await _platform.invokeMethod('openHomeSettings');
+      // Automatically dismiss the popup when going to settings to configure it,
+      // so it doesn't reappear when they return from system settings.
+      await _dismissSettings();
     } on PlatformException catch (e) {
       debugPrint("Error opening home settings: $e");
     }
@@ -134,127 +168,134 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // 1. Vertical PageView for Slides
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _onTap,
-            child: PageView.builder(
-              controller: _pageController,
-              scrollDirection: Axis.vertical,
-              itemBuilder: (context, index) {
-                if (_slides.isEmpty) return const SizedBox();
-                final item = _slides[index % _slides.length];
-                return _buildSlide(item);
-              },
+      body: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop) return;
+          if (_showSettings) {
+            _dismissSettings();
+          } else if (!_isDefaultLauncher) {
+            SystemNavigator.pop();
+          }
+        },
+        child: Stack(
+          children: [
+            // 1. Vertical PageView for Slides
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _onTap,
+              child: PageView.builder(
+                controller: _pageController,
+                scrollDirection: Axis.vertical,
+                itemBuilder: (context, index) {
+                  if (_slides.isEmpty) return const SizedBox();
+                  final item = _slides[index % _slides.length];
+                  return _buildSlide(item);
+                },
+              ),
             ),
-          ),
-
-          // 2. Settings button (Top Right)
-          Positioned(
-            top: 20,
-            right: 20,
-            child: ClipOval(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                child: Container(
-                  color: Colors.white.withOpacity(0.12),
-                  child: IconButton(
-                    icon: const Icon(Icons.settings, color: Colors.white, size: 26),
-                    onPressed: () {
-                      setState(() {
-                        _showSettings = !_showSettings;
-                      });
-                    },
+  
+            // 2. Settings button (Top Right)
+            Positioned(
+              top: 20,
+              right: 20,
+              child: ClipOval(
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  child: Container(
+                    color: Colors.white.withValues(alpha: 0.12),
+                    child: IconButton(
+                      icon: const Icon(Icons.settings, color: Colors.white, size: 26),
+                      onPressed: () {
+                        if (_showSettings) {
+                          _dismissSettings();
+                        } else {
+                          setState(() {
+                            _showSettings = true;
+                          });
+                        }
+                      },
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-
-          // 3. Settings Overlay Panel
-          if (_showSettings)
-            Positioned.fill(
-              child: GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _showSettings = false;
-                  });
-                },
-                child: Container(
-                  color: Colors.black.withOpacity(0.55),
-                  alignment: Alignment.center,
-                  child: GestureDetector(
-                    onTap: () {}, // Prevent taps inside from dismissing dialog
-                    child: Container(
-                      width: MediaQuery.of(context).size.width * 0.85,
-                      constraints: BoxConstraints(
-                        maxHeight: MediaQuery.of(context).size.height * 0.85,
-                      ),
-                      margin: const EdgeInsets.symmetric(horizontal: 16),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(24),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                          child: Container(
-                            padding: const EdgeInsets.all(24),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF0F0F1A).withOpacity(0.85),
-                              borderRadius: BorderRadius.circular(24),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.12),
-                                width: 1.5,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.6),
-                                  blurRadius: 35,
-                                  offset: const Offset(0, 15),
+  
+            // 3. Settings Overlay Panel
+            if (_showSettings)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: _dismissSettings,
+                  child: Container(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    alignment: Alignment.center,
+                    child: GestureDetector(
+                      onTap: () {}, // Prevent taps inside from dismissing dialog
+                      child: Container(
+                        width: MediaQuery.of(context).size.width * 0.85,
+                        constraints: BoxConstraints(
+                          maxHeight: MediaQuery.of(context).size.height * 0.85,
+                        ),
+                        margin: const EdgeInsets.symmetric(horizontal: 16),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(24),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                            child: Container(
+                              padding: const EdgeInsets.all(24),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF0F0F1A).withValues(alpha: 0.85),
+                                borderRadius: BorderRadius.circular(24),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.12),
+                                  width: 1.5,
                                 ),
-                              ],
-                            ),
-                            child: SingleChildScrollView(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  _buildHeader(),
-                                  const Divider(color: Colors.white24, height: 32),
-                                  _buildLauncherSetting(),
-                                  const SizedBox(height: 16),
-                                  _buildSpeedSetting(),
-                                  const Divider(color: Colors.white24, height: 32),
-                                  Center(
-                                    child: ElevatedButton(
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: const Color(0xFF4E54C8),
-                                        foregroundColor: Colors.white,
-                                        elevation: 4,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(14),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.6),
+                                    blurRadius: 35,
+                                    offset: const Offset(0, 15),
+                                  ),
+                                ],
+                              ),
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    _buildHeader(),
+                                    const Divider(color: Colors.white24, height: 32),
+                                    _buildLauncherSetting(),
+                                    const SizedBox(height: 16),
+                                    _buildSpeedSetting(),
+                                    const Divider(color: Colors.white24, height: 32),
+                                    Center(
+                                      child: ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF4E54C8),
+                                          foregroundColor: Colors.white,
+                                          elevation: 4,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(14),
+                                          ),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 40,
+                                            vertical: 14,
+                                          ),
                                         ),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 40,
-                                          vertical: 14,
-                                        ),
-                                      ),
-                                      onPressed: () {
-                                        setState(() {
-                                          _showSettings = false;
-                                        });
-                                      },
-                                      child: const Text(
-                                        'Save & Close',
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.bold,
-                                          letterSpacing: 0.5,
+                                        onPressed: _dismissSettings,
+                                        child: const Text(
+                                          'Save & Close',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.bold,
+                                            letterSpacing: 0.5,
+                                          ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
                           ),
@@ -264,8 +305,8 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
                   ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -276,7 +317,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
         Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            color: const Color(0xFF4E54C8).withOpacity(0.2),
+            color: const Color(0xFF4E54C8).withValues(alpha: 0.2),
             shape: BoxShape.circle,
           ),
           child: const Icon(Icons.settings_suggest, color: Color(0xFF8E94F2), size: 28),
@@ -307,11 +348,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
         ),
         IconButton(
           icon: const Icon(Icons.close, color: Colors.white60, size: 22),
-          onPressed: () {
-            setState(() {
-              _showSettings = false;
-            });
-          },
+          onPressed: _dismissSettings,
         ),
       ],
     );
@@ -321,12 +358,12 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.04),
+        color: Colors.white.withValues(alpha: 0.04),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: _isDefaultLauncher
-              ? Colors.greenAccent.withOpacity(0.2)
-              : Colors.white.withOpacity(0.05),
+              ? Colors.greenAccent.withValues(alpha: 0.2)
+              : Colors.white.withValues(alpha: 0.05),
         ),
       ),
       child: Row(
@@ -349,7 +386,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
                       ? 'Slides is currently your default Home App. Tap Remove to change/clear this in device settings.'
                       : 'Make Slides the default Home App so it starts when turning on device',
                   style: TextStyle(
-                    color: _isDefaultLauncher ? Colors.greenAccent : Colors.white.withOpacity(0.5),
+                    color: _isDefaultLauncher ? Colors.greenAccent : Colors.white.withValues(alpha: 0.5),
                     fontSize: 11,
                   ),
                 ),
@@ -384,9 +421,9 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(10),
-                      side: BorderSide(color: Colors.redAccent.withOpacity(0.4)),
+                      side: BorderSide(color: Colors.redAccent.withValues(alpha: 0.4)),
                     ),
-                    backgroundColor: Colors.redAccent.withOpacity(0.08),
+                    backgroundColor: Colors.redAccent.withValues(alpha: 0.08),
                   ),
                   onPressed: _openHomeSettings,
                   icon: const Icon(Icons.settings_backup_restore, size: 16),
@@ -421,9 +458,9 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.04),
+        color: Colors.white.withValues(alpha: 0.04),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -442,7 +479,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF4E54C8).withOpacity(0.25),
+                  color: const Color(0xFF4E54C8).withValues(alpha: 0.25),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -460,7 +497,7 @@ class _SlideShowPageState extends State<SlideShowPage> with WidgetsBindingObserv
           Text(
             'Adjust how long each slide displays before scrolling down to the next.',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.5),
+              color: Colors.white.withValues(alpha: 0.5),
               fontSize: 11,
             ),
           ),
